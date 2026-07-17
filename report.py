@@ -17,11 +17,17 @@ def _profile_section(profile: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def _financials_section() -> str:
-    return (
-        "## 二、财务表现\n\n"
-        "*本节留待 M5 阶段接入 akshare 财务接口（营收、利润及同比）后补齐*"
-    )
+def _financials_section(financials: pd.DataFrame | None) -> str:
+    if financials is None or financials.empty:
+        return "## 二、财务表现\n\n*财务数据源不可用，暂缺*"
+    lines = ["## 二、财务表现", ""]
+    lines.append("| " + " | ".join(financials.columns) + " |")
+    lines.append("|" + "|".join("---" for _ in financials.columns) + "|")
+    for _, row in financials.iterrows():
+        lines.append("| " + " | ".join(str(v) for v in row) + " |")
+    lines.append("")
+    lines.append("> 数据来源：同花顺（akshare `stock_financial_abstract_ths`），最近 6 个报告期")
+    return "\n".join(lines)
 
 
 def _sources_section(materials: list[Material]) -> str:
@@ -43,6 +49,7 @@ def _disclaimer() -> str:
 def render(
     ticker: str,
     profile: pd.DataFrame,
+    financials: pd.DataFrame | None,
     llm_sections: str,
     materials: list[Material],
 ) -> Path:
@@ -52,7 +59,7 @@ def render(
     body = "\n\n".join([
         header,
         _profile_section(profile),
-        _financials_section(),
+        _financials_section(financials),
         llm_sections,
         _sources_section(materials),
         _disclaimer(),

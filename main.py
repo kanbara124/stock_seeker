@@ -1,18 +1,25 @@
 import argparse
 import hashlib
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
 from collector.fetcher import fetch_article
-from collector.fundamental import get_company_profile, get_recent_news
+from collector.fundamental import (
+    get_announcements,
+    get_company_profile,
+    get_financial_abstract,
+    get_recent_news,
+)
 from materials import load_materials
 from report import render
 from summarizer import summarize_sections
 
 CACHE_DIR = Path("cache")
 FETCH_LIMIT = 5
+ANNOUNCEMENT_WINDOW_DAYS = 90
 
 
 def _cache_path(ticker: str, url: str) -> Path:
@@ -26,12 +33,35 @@ def _save_article(path: Path, url: str, title: str, text: str) -> None:
 
 
 def main(ticker: str, refresh: bool) -> None:
-    print(f"[1/4] 抓取公司概况 {ticker}")
+    print(f"[1/5] 抓取公司概况 {ticker}")
     profile = get_company_profile(ticker)
 
-    print(f"[2/4] 抓取新闻列表并下载正文（前 {FETCH_LIMIT} 条，refresh={refresh}）")
-    news = get_recent_news(ticker, limit=10)
+    print(f"[2/5] 抓取财务摘要")
+    financials = get_financial_abstract(ticker)
+    print(f"    最新 {len(financials)} 期，最近报告期：{financials.iloc[0]['报告期']}")
+
+    print(f"[3/5] 抓取近 {ANNOUNCEMENT_WINDOW_DAYS} 天 T1 公告 + 前 {FETCH_LIMIT} 条 T3 新闻（refresh={refresh}）")
     urls_this_run: set[str] = set()
+
+    end = date.today()
+    start = end - timedelta(days=ANNOUNCEMENT_WINDOW_DAYS)
+    announcements = get_announcements(
+        ticker, start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+    )
+    for _, row in announcements.iterrows():
+        url = row["公告链接"]
+        title = row["公告标题"]
+        pdate = row["公告时间"]
+        path = _cache_path(ticker, url)
+        if path.exists() and not refresh:
+            urls_this_run.add(url)
+            continue
+        body = f"公告标题：{title}\n公告日期：{pdate}\n（正文暂未提取，M5.5 阶段接入 PyMuPDF 解析 PDF 后补齐）"
+        _save_article(path, url, title, body)
+        urls_this_run.add(url)
+    print(f"    T1 公告：{len(announcements)} 条")
+
+    news = get_recent_news(ticker, limit=10)
     hits = fresh = fails = 0
     for _, row in news.head(FETCH_LIMIT).iterrows():
         url = row["新闻链接"]
@@ -39,7 +69,6 @@ def main(ticker: str, refresh: bool) -> None:
         if path.exists() and not refresh:
             urls_this_run.add(url)
             hits += 1
-            print(f"    [·] cached  {url}")
             continue
         result = fetch_article(url)
         if result is None:
@@ -50,19 +79,19 @@ def main(ticker: str, refresh: bool) -> None:
         _save_article(path, url, row["新闻标题"], body)
         urls_this_run.add(url)
         fresh += 1
-        print(f"    [+] fetched {url}")
-    print(f"    汇总：命中缓存 {hits}，新抓取 {fresh}，失败 {fails}")
+    print(f"    T3 新闻：命中 {hits}，新抓 {fresh}，失败 {fails}")
 
-    print(f"[3/4] 调用 LLM 生成三章节")
+    print(f"[4/5] 调用 LLM 生成三章节")
     materials = load_materials(CACHE_DIR / ticker, urls=urls_this_run)
     if not materials:
         print("素材库为空，终止")
         return
+    print(f"    素材总数：{len(materials)}")
     llm_sections, usage = summarize_sections(ticker, materials)
     print(f"    token: input={usage['prompt_tokens']}, output={usage['completion_tokens']}")
 
-    print(f"[4/4] 渲染 Markdown 报告")
-    path = render(ticker, profile, llm_sections, materials)
+    print(f"[5/5] 渲染 Markdown 报告")
+    path = render(ticker, profile, financials, llm_sections, materials)
     print(f"    已生成：{path}")
 
 
