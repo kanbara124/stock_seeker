@@ -1,3 +1,4 @@
+import argparse
 import hashlib
 import sys
 from pathlib import Path
@@ -14,32 +15,43 @@ CACHE_DIR = Path("cache")
 FETCH_LIMIT = 5
 
 
-def _save_article(ticker: str, url: str, title: str, text: str) -> Path:
-    out_dir = CACHE_DIR / ticker
-    out_dir.mkdir(parents=True, exist_ok=True)
+def _cache_path(ticker: str, url: str) -> Path:
     key = hashlib.md5(url.encode()).hexdigest()[:12]
-    path = out_dir / f"{key}.txt"
+    return CACHE_DIR / ticker / f"{key}.txt"
+
+
+def _save_article(path: Path, url: str, title: str, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{title}\n{url}\n\n{text}\n", encoding="utf-8")
-    return path
 
 
-def main(ticker: str) -> None:
+def main(ticker: str, refresh: bool) -> None:
     print(f"[1/4] 抓取公司概况 {ticker}")
     profile = get_company_profile(ticker)
 
-    print(f"[2/4] 抓取新闻列表并下载正文（前 {FETCH_LIMIT} 条）")
+    print(f"[2/4] 抓取新闻列表并下载正文（前 {FETCH_LIMIT} 条，refresh={refresh}）")
     news = get_recent_news(ticker, limit=10)
     urls_this_run: set[str] = set()
+    hits = fresh = fails = 0
     for _, row in news.head(FETCH_LIMIT).iterrows():
         url = row["新闻链接"]
+        path = _cache_path(ticker, url)
+        if path.exists() and not refresh:
+            urls_this_run.add(url)
+            hits += 1
+            print(f"    [·] cached  {url}")
+            continue
         result = fetch_article(url)
         if result is None:
-            print(f"    [-] {url}")
+            fails += 1
+            print(f"    [-] failed  {url}")
             continue
         _, body = result
-        _save_article(ticker, url, row["新闻标题"], body)
+        _save_article(path, url, row["新闻标题"], body)
         urls_this_run.add(url)
-    print(f"    抓取完成：{len(urls_this_run)}/{FETCH_LIMIT}")
+        fresh += 1
+        print(f"    [+] fetched {url}")
+    print(f"    汇总：命中缓存 {hits}，新抓取 {fresh}，失败 {fails}")
 
     print(f"[3/4] 调用 LLM 生成三章节")
     materials = load_materials(CACHE_DIR / ticker, urls=urls_this_run)
@@ -55,5 +67,8 @@ def main(ticker: str) -> None:
 
 
 if __name__ == "__main__":
-    ticker = sys.argv[1] if len(sys.argv) > 1 else "600519"
-    main(ticker)
+    parser = argparse.ArgumentParser(description="股票调研报告生成")
+    parser.add_argument("ticker", nargs="?", default="600519", help="股票代码，如 600519")
+    parser.add_argument("--refresh", action="store_true", help="忽略缓存，强制重新抓取")
+    args = parser.parse_args()
+    main(args.ticker, refresh=args.refresh)
