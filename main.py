@@ -7,7 +7,8 @@ sys.stdout.reconfigure(encoding="utf-8")
 from collector.fetcher import fetch_article
 from collector.fundamental import get_company_profile, get_recent_news
 from materials import load_materials
-from summarizer import summarize
+from report import render
+from summarizer import summarize_sections
 
 CACHE_DIR = Path("cache")
 FETCH_LIMIT = 5
@@ -23,37 +24,34 @@ def _save_article(ticker: str, url: str, title: str, text: str) -> Path:
 
 
 def main(ticker: str) -> None:
-    print(f"=== 公司概况 {ticker} ===")
+    print(f"[1/4] 抓取公司概况 {ticker}")
     profile = get_company_profile(ticker)
-    print(profile.to_string(index=False))
 
-    print(f"\n=== 近期新闻（前 10 条） ===")
+    print(f"[2/4] 抓取新闻列表并下载正文（前 {FETCH_LIMIT} 条）")
     news = get_recent_news(ticker, limit=10)
-    print(news.to_string(index=False))
-
-    print(f"\n=== 抓取正文（前 {FETCH_LIMIT} 条） ===")
-    success = 0
+    urls_this_run: set[str] = set()
     for _, row in news.head(FETCH_LIMIT).iterrows():
         url = row["新闻链接"]
         result = fetch_article(url)
         if result is None:
-            print(f"[-] {url}")
+            print(f"    [-] {url}")
             continue
         _, body = result
-        title = row["新闻标题"]
-        path = _save_article(ticker, url, title, body)
-        print(f"[+] {path} ({len(body)} chars) — {title[:40]}")
-        success += 1
-    print(f"抓取完成：{success}/{FETCH_LIMIT} 成功")
+        _save_article(ticker, url, row["新闻标题"], body)
+        urls_this_run.add(url)
+    print(f"    抓取完成：{len(urls_this_run)}/{FETCH_LIMIT}")
 
-    print(f"\n=== LLM 汇总 ===")
-    materials = load_materials(CACHE_DIR / ticker)
+    print(f"[3/4] 调用 LLM 生成三章节")
+    materials = load_materials(CACHE_DIR / ticker, urls=urls_this_run)
     if not materials:
-        print("素材库为空，跳过 LLM 汇总")
+        print("素材库为空，终止")
         return
-    summary, usage = summarize(ticker, materials)
-    print(summary)
-    print(f"\n[token] input={usage['prompt_tokens']}, output={usage['completion_tokens']}")
+    llm_sections, usage = summarize_sections(ticker, materials)
+    print(f"    token: input={usage['prompt_tokens']}, output={usage['completion_tokens']}")
+
+    print(f"[4/4] 渲染 Markdown 报告")
+    path = render(ticker, profile, llm_sections, materials)
+    print(f"    已生成：{path}")
 
 
 if __name__ == "__main__":
