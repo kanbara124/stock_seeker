@@ -1,0 +1,63 @@
+import os
+
+from dotenv import load_dotenv
+from tavily import TavilyClient
+
+load_dotenv()
+
+_ALLOWED_DOMAINS = [
+    "xueqiu.com",
+    "hibor.com.cn",
+    "guba.eastmoney.com",
+    "21jingji.com",
+    "caixin.com",
+    "yicai.com",
+    "jiemian.com",
+    "wallstreetcn.com",
+    "cs.com.cn",
+    "cnstock.com",
+    "stcn.com",
+    "cls.cn",
+    "bjnews.com.cn",
+    "thepaper.cn",
+]
+
+SEARCH_TEMPLATES = [
+    "{name} 研报 观点",
+    "{name} 深度分析",
+    "{name} 风险 争议",
+]
+
+
+def _client() -> TavilyClient:
+    key = os.environ.get("TAVILY_API_KEY")
+    if not key:
+        raise RuntimeError("TAVILY_API_KEY 未设置（检查 .env）")
+    return TavilyClient(api_key=key)
+
+
+def search_urls(query: str, max_results: int = 5) -> list[tuple[str, str]]:
+    resp = _client().search(
+        query=query,
+        max_results=max_results,
+        include_domains=_ALLOWED_DOMAINS,
+    )
+    results = []
+    for r in resp.get("results", []):
+        url = r.get("url", "")
+        if "xueqiu.com/S/" in url:
+            continue
+        results.append((url, r.get("title") or ""))
+    return results
+
+
+def search_topics(name: str, per_query: int = 5) -> list[tuple[str, str]]:
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for tpl in SEARCH_TEMPLATES:
+        for url, title in search_urls(tpl.format(name=name), max_results=per_query):
+            if url in seen:
+                continue
+            seen.add(url)
+            out.append((url, title))
+    return out
