@@ -1,2 +1,4 @@
 akshare
 trafilatura
+openai
+python-dotenv

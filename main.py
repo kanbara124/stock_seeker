@@ -6,6 +6,8 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from collector.fetcher import fetch_article
 from collector.fundamental import get_company_profile, get_recent_news
+from materials import load_materials
+from summarizer import summarize
 
 CACHE_DIR = Path("cache")
 FETCH_LIMIT = 5
@@ -30,18 +32,28 @@ def main(ticker: str) -> None:
     print(news.to_string(index=False))
 
     print(f"\n=== 抓取正文（前 {FETCH_LIMIT} 条） ===")
-    urls = news["新闻链接"].head(FETCH_LIMIT).tolist()
     success = 0
-    for url in urls:
+    for _, row in news.head(FETCH_LIMIT).iterrows():
+        url = row["新闻链接"]
         result = fetch_article(url)
         if result is None:
             print(f"[-] {url}")
             continue
-        title, text = result
-        path = _save_article(ticker, url, title, text)
-        print(f"[+] {path} ({len(text)} chars) — {title[:40]}")
+        _, body = result
+        title = row["新闻标题"]
+        path = _save_article(ticker, url, title, body)
+        print(f"[+] {path} ({len(body)} chars) — {title[:40]}")
         success += 1
-    print(f"\n抓取完成：{success}/{FETCH_LIMIT} 成功")
+    print(f"抓取完成：{success}/{FETCH_LIMIT} 成功")
+
+    print(f"\n=== LLM 汇总 ===")
+    materials = load_materials(CACHE_DIR / ticker)
+    if not materials:
+        print("素材库为空，跳过 LLM 汇总")
+        return
+    summary, usage = summarize(ticker, materials)
+    print(summary)
+    print(f"\n[token] input={usage['prompt_tokens']}, output={usage['completion_tokens']}")
 
 
 if __name__ == "__main__":
