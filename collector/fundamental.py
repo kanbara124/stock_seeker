@@ -154,7 +154,11 @@ def get_company_profile(ticker: str) -> CompanyProfile:
 # ---------------------------------------------------------------------------
 
 def get_recent_news(ticker: str, limit: int = 10) -> pd.DataFrame:
-    return ak.stock_news_em(symbol=ticker).head(limit)
+    try:
+        return ak.stock_news_em(symbol=ticker).head(limit)
+    except Exception as exc:
+        print(f"[fundamental] stock_news_em failed for {ticker}: {exc}")
+        return pd.DataFrame()
 
 
 _FIN_COLS = ["报告期", "营业总收入", "营业总收入同比增长率", "净利润", "净利润同比增长率"]

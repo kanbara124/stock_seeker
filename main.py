@@ -156,7 +156,7 @@ def main(ticker: str, refresh: bool) -> None:
     print(f"[4/7] 抓取 T3 新闻（akshare + Tavily 拓源，refresh={refresh}）")
     stats = {"hit": 0, "fresh": 0, "fail": 0, "dup": 0}
 
-    news = get_recent_news(ticker, limit=10)
+    news = get_recent_news(ticker, limit=NEWS_FETCH_LIMIT)
     for _, row in news.head(NEWS_FETCH_LIMIT).iterrows():
         s = _cache_or_fetch(ticker, row["新闻链接"], row["新闻标题"], refresh, urls_this_run)
         stats[s] += 1
