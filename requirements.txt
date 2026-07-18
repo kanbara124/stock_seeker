@@ -3,3 +3,6 @@ trafilatura
 openai
 python-dotenv
 tavily-python
+playwright
+beautifulsoup4
+lxml
