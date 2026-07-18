@@ -86,7 +86,7 @@ NXNY_REPORT_LIMIT = 5
 def main(ticker: str, refresh: bool) -> None:
     print(f"[1/7] 抓取公司概况 {ticker}")
     profile = get_company_profile(ticker)
-    company_name = profile.loc[profile["item"] == "股票简称", "value"].iat[0]
+    company_name = profile.name
     print(f"    {company_name}")
 
     print(f"[2/7] 抓取财务摘要")
