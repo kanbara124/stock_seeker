@@ -11,6 +11,7 @@ from analytics import (
     analyze_causal_chains,
     analyze_sources,
     build_analytics_text,
+    build_peer_comparison_text,
     compute_financial_trends,
     score_guba_sentiment,
 )
@@ -19,12 +20,18 @@ from collector.fundamental import (
     get_announcements,
     get_company_profile,
     get_financial_abstract,
+    get_industry_peers,
+    get_peer_financials,
     get_recent_news,
 )
 from collector.guba import fetch_guba_posts
 from collector.nxny import get_nxny_reports
 from collector.pdf_fetcher import extract_announcement_pdf
-from collector.search import search_topics
+from collector.search import (
+    search_peer_comparison,
+    search_supply_chain,
+    search_topics,
+)
 from collector.xueqiu import (
     get_xueqiu_announcements,
     get_xueqiu_discussions,
@@ -96,12 +103,12 @@ NXNY_REPORT_LIMIT = 8
 
 
 def main(ticker: str, refresh: bool) -> None:
-    print(f"[1/7] 抓取公司概况 {ticker}")
+    print(f"[1/9] 抓取公司概况 {ticker}")
     profile = get_company_profile(ticker)
     company_name = profile.name
     print(f"    {company_name}")
 
-    print(f"[2/7] 抓取财务摘要")
+    print(f"[2/9] 抓取财务摘要")
     financials = get_financial_abstract(ticker)
     print(f"    最新报告期：{financials.iloc[0]['报告期']}，共 {len(financials)} 期")
 
@@ -109,7 +116,7 @@ def main(ticker: str, refresh: bool) -> None:
     end = date.today()
     start = end - timedelta(days=ANNOUNCEMENT_WINDOW_DAYS)
 
-    print(f"[3/7] 抓取 T1 巨潮公告（近 {ANNOUNCEMENT_WINDOW_DAYS} 天）")
+    print(f"[3/9] 抓取 T1 巨潮公告（近 {ANNOUNCEMENT_WINDOW_DAYS} 天）")
     announcements = get_announcements(
         ticker, start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
     )
@@ -153,7 +160,7 @@ def main(ticker: str, refresh: bool) -> None:
           f"命中 {xq_ann_stats['hit']} / 新存 {xq_ann_stats['fresh']} / "
           f"去重 {xq_ann_stats['dup']} / 跳过 {xq_ann_stats['skip']}")
 
-    print(f"[4/7] 抓取 T3 新闻（akshare + Tavily 拓源，refresh={refresh}）")
+    print(f"[4/9] 抓取 T3 新闻（akshare + Tavily 拓源，refresh={refresh}）")
     stats = {"hit": 0, "fresh": 0, "fail": 0, "dup": 0}
 
     news = get_recent_news(ticker, limit=NEWS_FETCH_LIMIT)
@@ -168,7 +175,7 @@ def main(ticker: str, refresh: bool) -> None:
     print(f"    akshare {NEWS_FETCH_LIMIT} 条 + Tavily {len(tavily_hits)} 条 → "
           f"命中 {stats['hit']} / 新抓 {stats['fresh']} / 失败 {stats['fail']} / 去重 {stats['dup']}")
 
-    print(f"[5/7] 抓取 T4 雪球讨论 + 股票报告网研报")
+    print(f"[5/9] 抓取 T4 雪球讨论 + 股票报告网研报")
     t4_stats = {"hit": 0, "fresh": 0, "dup": 0, "skip": 0}
 
     xq_discussions = get_xueqiu_discussions(
@@ -199,7 +206,7 @@ def main(ticker: str, refresh: bool) -> None:
     print(f"    T4 合计 → 命中 {t4_stats['hit']} / 新存 {t4_stats['fresh']} / "
           f"去重 {t4_stats['dup']} / 跳过 {t4_stats['skip']}")
 
-    print(f"[5.5/7] 股吧情绪聚合")
+    print(f"[5.5/9] 股吧情绪聚合")
     guba_sentiment_url = f"guba://sentiment/{ticker}"
     guba_path = _cache_path(ticker, guba_sentiment_url)
     if guba_path.exists() and not refresh:
@@ -218,7 +225,51 @@ def main(ticker: str, refresh: bool) -> None:
         else:
             print(f"    股吧帖子获取失败")
 
-    print(f"[5.8/7] 数据洞察分析")
+    print(f"[5.6/9] 产业链上下游搜索")
+    supply_chain_url = f"supply://chain/{ticker}"
+    supply_chain_path = _cache_path(ticker, supply_chain_url)
+    if supply_chain_path.exists() and not refresh:
+        urls_this_run.add(supply_chain_url)
+        print(f"    使用缓存")
+    else:
+        sc_hits = search_supply_chain(company_name, per_query=TAVILY_PER_QUERY)
+        for url, title in sc_hits:
+            _cache_or_fetch(ticker, url, title, refresh, urls_this_run)
+        if sc_hits:
+            sc_blocks = [f"- {title} ({url})" for url, title in sc_hits]
+            _save_article(supply_chain_path, supply_chain_url, "产业链上下游",
+                          "以下为产业链上下游相关文章索引：\n" + "\n".join(sc_blocks))
+            urls_this_run.add(supply_chain_url)
+        print(f"    产业链搜索：{len(sc_hits)} 条")
+
+    print(f"[5.7/9] 同业对比搜索 + 同行财务收集")
+    peer_comparison_url = f"peer://comparison/{ticker}"
+    peer_comparison_path = _cache_path(ticker, peer_comparison_url)
+    peer_comparison_text = ""
+    if peer_comparison_path.exists() and not refresh:
+        urls_this_run.add(peer_comparison_url)
+        print(f"    使用缓存")
+    else:
+        pc_hits = search_peer_comparison(company_name, per_query=TAVILY_PER_QUERY)
+        for url, title in pc_hits:
+            _cache_or_fetch(ticker, url, title, refresh, urls_this_run)
+
+        peers = get_industry_peers(profile.industry, ticker)
+        peer_fins = get_peer_financials(peers)
+        peer_comparison_text = build_peer_comparison_text(
+            company_name,
+            str(financials.iloc[0]["营业总收入"]) if len(financials) > 0 else "—",
+            str(financials.iloc[0].get("营业总收入同比增长率", "—")) if len(financials) > 0 else "—",
+            str(financials.iloc[0]["净利润"]) if len(financials) > 0 else "—",
+            str(financials.iloc[0].get("净利润同比增长率", "—")) if len(financials) > 0 else "—",
+            peer_fins,
+        )
+        pc_body = f"同业对比搜索文章：{len(pc_hits)} 篇\n\n{peer_comparison_text}"
+        _save_article(peer_comparison_path, peer_comparison_url, "同业比较", pc_body)
+        urls_this_run.add(peer_comparison_url)
+        print(f"    同业对比搜索：{len(pc_hits)} 篇，同行财务：{len(peer_fins)} 家")
+
+    print(f"[5.8/9] 数据洞察分析")
     analytics_url = f"analytics://insight/{ticker}"
     analytics_path = _cache_path(ticker, analytics_url)
     if analytics_path.exists() and not refresh:
@@ -231,15 +282,34 @@ def main(ticker: str, refresh: bool) -> None:
         raw_materials = load_materials(CACHE_DIR / ticker)
         src = analyze_sources(raw_materials)
         causal = analyze_causal_chains(company_name, raw_materials)
-        analytics_text = build_analytics_text(trends, sent_score, src, causal)
+
+        if not peer_comparison_text and peer_comparison_path.exists():
+            existing = peer_comparison_path.read_text(encoding="utf-8")
+            peer_comparison_text = existing.split("\n\n", 1)[-1] if "\n\n" in existing else ""
+
+        if not peer_comparison_text:
+            peers = get_industry_peers(profile.industry, ticker)
+            peer_fins = get_peer_financials(peers)
+            peer_comparison_text = build_peer_comparison_text(
+                company_name,
+                str(financials.iloc[0]["营业总收入"]) if len(financials) > 0 else "—",
+                str(financials.iloc[0].get("营业总收入同比增长率", "—")) if len(financials) > 0 else "—",
+                str(financials.iloc[0]["净利润"]) if len(financials) > 0 else "—",
+                str(financials.iloc[0].get("净利润同比增长率", "—")) if len(financials) > 0 else "—",
+                peer_fins,
+            )
+
+        analytics_text = build_analytics_text(trends, sent_score, src, causal, peer_comparison_text)
         _save_article(analytics_path, analytics_url, "数据洞察", analytics_text)
         urls_this_run.add(analytics_url)
         parts = ["财务趋势", "情绪量化", "来源覆盖"]
         if causal:
             parts.append("因果链分析")
+        if peer_comparison_text:
+            parts.append("同业比较")
         print(f"    {' + '.join(parts)} 已生成")
 
-    print(f"[6/7] 调用 LLM 生成三章节")
+    print(f"[6/9] 调用 LLM 生成六章节")
     materials = load_materials(CACHE_DIR / ticker, urls=urls_this_run)
     if not materials:
         print("素材库为空，终止")
@@ -253,7 +323,7 @@ def main(ticker: str, refresh: bool) -> None:
     thinking_str = f" + {usage.get('reasoning_tokens', 0)} reasoning" if "reasoning_tokens" in usage else ""
     print(f"    token: input={usage['prompt_tokens']}, output={usage['completion_tokens']}{thinking_str}")
 
-    print(f"[7/7] 渲染 Markdown 报告")
+    print(f"[7/9] 渲染 Markdown 报告")
     path = render(ticker, profile, financials, llm_sections, materials)
     print(f"    已生成：{path}")
 

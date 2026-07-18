@@ -115,7 +115,7 @@ def _financials_section(financials: pd.DataFrame | None) -> str:
 
 
 def _sources_section(materials: list[Material]) -> str:
-    lines = ["## 七、信息来源清单", ""]
+    lines = ["## 九、信息来源清单", ""]
     for m in materials:
         title = m.title or "(无标题)"
         lines.append(f"- [{m.n}] {title} — <{m.url}>")

@@ -178,3 +178,60 @@ def get_announcements(ticker: str, start_date: str, end_date: str) -> pd.DataFra
     return ak.stock_zh_a_disclosure_report_cninfo(
         symbol=ticker, market="沪深京", start_date=start_date, end_date=end_date
     )
+
+
+def get_industry_peers(industry_name: str, exclude_ticker: str) -> list[dict]:
+    """Find peer companies in the same THS industry board."""
+    peers: list[dict] = []
+    try:
+        boards = ak.stock_board_industry_summary_ths()
+        for _, row in boards.iterrows():
+            bname = str(row.get("板块名称", row.iloc[0] if not row.empty else ""))
+            if not bname or industry_name[:4] not in bname:
+                continue
+            bcode = str(row.get("板块代码", row.iloc[1] if len(row) > 1 else ""))
+            if not bcode:
+                continue
+            cons = ak.stock_board_industry_cons_ths(symbol=bcode)
+            for _, c in cons.iterrows():
+                code = str(c.get("代码", c.iloc[0] if not c.empty else ""))
+                name = str(c.get("名称", c.iloc[1] if len(c) > 1 else ""))
+                if not code or code == exclude_ticker:
+                    continue
+                peers.append({"ticker": code, "name": name})
+            return peers[:10]
+    except Exception:
+        pass
+    return peers
+
+
+@dataclass
+class PeerFinancialSnapshot:
+    ticker: str
+    name: str
+    revenue: str | None = None          # 最新一期营收
+    revenue_yoy: str | None = None      # 营收同比
+    profit: str | None = None           # 最新一期净利润
+    profit_yoy: str | None = None       # 净利润同比
+
+
+def get_peer_financials(peers: list[dict]) -> list[PeerFinancialSnapshot]:
+    """Fetch financial abstracts for peer companies."""
+    results: list[PeerFinancialSnapshot] = []
+    for p in peers:
+        try:
+            df = ak.stock_financial_abstract_ths(symbol=p["ticker"], indicator="按报告期")
+            latest = df.iloc[0]
+            results.append(PeerFinancialSnapshot(
+                ticker=p["ticker"],
+                name=p["name"],
+                revenue=str(latest.get("营业总收入", "")),
+                revenue_yoy=str(latest.get("营业总收入同比增长率", "")),
+                profit=str(latest.get("净利润", "")),
+                profit_yoy=str(latest.get("净利润同比增长率", "")),
+            ))
+        except Exception:
+            results.append(PeerFinancialSnapshot(
+                ticker=p["ticker"], name=p["name"],
+            ))
+    return results

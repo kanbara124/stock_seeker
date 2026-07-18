@@ -28,6 +28,16 @@ SEARCH_TEMPLATES = [
     "{name} 风险 争议",
 ]
 
+SUPPLY_CHAIN_TEMPLATES = [
+    "{name} 产业链 上游 下游 供应商",
+    "{name} 原材料 客户 销售渠道",
+]
+
+PEER_COMPARISON_TEMPLATES = [
+    "{name} 同行 对比 竞争对手",
+    "{name} 行业 对标 估值 比较",
+]
+
 
 def _client() -> TavilyClient:
     key = os.environ.get("TAVILY_API_KEY")
@@ -51,13 +61,25 @@ def search_urls(query: str, max_results: int = 5) -> list[tuple[str, str]]:
     return results
 
 
-def search_topics(name: str, per_query: int = 5) -> list[tuple[str, str]]:
+def _search(name: str, templates: list[str], per_query: int) -> list[tuple[str, str]]:
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
-    for tpl in SEARCH_TEMPLATES:
+    for tpl in templates:
         for url, title in search_urls(tpl.format(name=name), max_results=per_query):
             if url in seen:
                 continue
             seen.add(url)
             out.append((url, title))
     return out
+
+
+def search_topics(name: str, per_query: int = 5) -> list[tuple[str, str]]:
+    return _search(name, SEARCH_TEMPLATES, per_query)
+
+
+def search_supply_chain(name: str, per_query: int = 5) -> list[tuple[str, str]]:
+    return _search(name, SUPPLY_CHAIN_TEMPLATES, per_query)
+
+
+def search_peer_comparison(name: str, per_query: int = 5) -> list[tuple[str, str]]:
+    return _search(name, PEER_COMPARISON_TEMPLATES, per_query)

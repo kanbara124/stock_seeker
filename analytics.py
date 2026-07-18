@@ -306,6 +306,7 @@ def build_analytics_text(
     sentiment: SentimentScore,
     sources: SourceDiversity,
     causal_chains: str = "",
+    peer_comparison_text: str = "",
 ) -> str:
     """Generate a structured analytics summary for injection into the LLM prompt."""
     lines = ["---", "## 数据洞察（自动化分析）", ""]
@@ -352,6 +353,47 @@ def build_analytics_text(
         lines.append(causal_chains)
         lines.append("")
 
+    if peer_comparison_text:
+        lines.append(peer_comparison_text)
+        lines.append("")
+
     lines.append("*以上数据由程序自动计算，供 LLM 在撰写报告时参考。*")
     lines.append("---")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# peer comparison analytics
+# ---------------------------------------------------------------------------
+
+
+def build_peer_comparison_text(
+    target_name: str,
+    target_revenue: str,
+    target_revenue_yoy: str,
+    target_profit: str,
+    target_profit_yoy: str,
+    peers: list,   # list of PeerFinancialSnapshot
+) -> str:
+    """Generate a peer comparison table and summary for LLM consumption."""
+    if not peers:
+        return ""
+
+    lines = ["**同业比较（自动化计算）**", ""]
+    lines.append(f"目标公司：{target_name}")
+    lines.append(f"  最新一期营收：{target_revenue}    营收同比：{target_revenue_yoy}")
+    lines.append(f"  最新一期净利润：{target_profit}    净利润同比：{target_profit_yoy}")
+    lines.append("")
+
+    lines.append("| 公司 | 营收 | 营收同比 | 净利润 | 净利润同比 |")
+    lines.append("|------|------|----------|--------|------------|")
+    for p in peers:
+        rev = p.revenue or "—"
+        rev_yoy = p.revenue_yoy or "—"
+        profit = p.profit or "—"
+        profit_yoy = p.profit_yoy or "—"
+        lines.append(f"| {p.name}({p.ticker}) | {rev} | {rev_yoy} | {profit} | {profit_yoy} |")
+
+    lines.append("")
+    lines.append("*同业财务数据来源于同花顺（akshare），仅展示最近一个报告期。*")
     return "\n".join(lines)
