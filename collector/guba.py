@@ -2,14 +2,14 @@
 东方财富股吧 post collector.
 
 Parses the ``article_list`` JS variable embedded in the guba list page
-(no JS rendering / API key required).  Returns post titles + engagement
-metadata for sentiment aggregation.
+per page; supports pagination (``_2.html`` ... ``_N.html``).
 """
 
 from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 
 import requests
@@ -19,7 +19,7 @@ _UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
-_LIST_URL = "https://guba.eastmoney.com/list,{ticker}.html"
+_BASE_URL = "https://guba.eastmoney.com/list,{ticker}"
 _POST_URL = "https://guba.eastmoney.com/news,{ticker},{post_id}.html"
 
 _article_list_re = re.compile(
@@ -47,13 +47,12 @@ class GubaPost:
         )
 
 
-def fetch_guba_posts(ticker: str, limit: int = 50) -> list[GubaPost]:
-    """Fetch recent guba posts for a stock ticker.
+def _fetch_page(ticker: str, page: int) -> list[dict]:
+    if page <= 1:
+        url = f"{_BASE_URL.format(ticker=ticker)}.html"
+    else:
+        url = f"{_BASE_URL.format(ticker=ticker)}_{page}.html"
 
-    Returns a mix of user discussions (type 205, prioritized) and
-    high-engagement news items (type 100), up to *limit* posts.
-    """
-    url = _LIST_URL.format(ticker=ticker)
     s = requests.Session()
     s.headers.update({"User-Agent": _UA})
 
@@ -72,13 +71,18 @@ def fetch_guba_posts(ticker: str, limit: int = 50) -> list[GubaPost]:
     except json.JSONDecodeError:
         return []
 
-    items = data.get("re", [])
-    if not items:
-        return []
+    return data.get("re", [])
 
+
+def _parse_items(items: list[dict], ticker: str) -> list[GubaPost]:
     posts: list[GubaPost] = []
+    seen: set[str] = set()
     for item in items:
         pid = str(item.get("post_id", ""))
+        if pid in seen:
+            continue
+        seen.add(pid)
+
         title = (item.get("post_title") or "").strip()
         user = (item.get("user_nickname") or "").strip()
         reads = int(item.get("post_click_count") or 0)
@@ -89,23 +93,41 @@ def fetch_guba_posts(ticker: str, limit: int = 50) -> list[GubaPost]:
         if not pid or not title:
             continue
 
-        posts.append(
-            GubaPost(
-                post_id=pid,
-                title=title,
-                user_name=user,
-                reads=reads,
-                comments=comments,
-                post_type=post_type,
-                publish_time=publish_time,
-                url=_POST_URL.format(ticker=ticker, post_id=pid),
-            )
-        )
+        posts.append(GubaPost(
+            post_id=pid, title=title, user_name=user,
+            reads=reads, comments=comments, post_type=post_type,
+            publish_time=publish_time,
+            url=_POST_URL.format(ticker=ticker, post_id=pid),
+        ))
+    return posts
 
-    # Prioritize discussions, then add high-engagement news
-    discussions = [p for p in posts if p.post_type == 205]
+
+def fetch_guba_posts(
+    ticker: str, limit: int = 80, pages: int = 3,
+) -> list[GubaPost]:
+    """Fetch guba posts across multiple pages.
+
+    Args:
+        ticker: stock ticker
+        limit: max total posts returned
+        pages: number of pages to scrape (1-indexed)
+
+    Returns a mix of user discussions (type 205, prioritized) and
+    high-engagement news items (type 100).
+    """
+    all_posts: list[GubaPost] = []
+
+    for p in range(1, pages + 1):
+        items = _fetch_page(ticker, p)
+        if not items:
+            break
+        all_posts.extend(_parse_items(items, ticker))
+        if p < pages:
+            time.sleep(0.5)
+
+    discussions = [p for p in all_posts if p.post_type == 205]
     news_sorted = sorted(
-        [p for p in posts if p.post_type != 205],
+        [p for p in all_posts if p.post_type != 205],
         key=lambda p: (p.comments, p.reads),
         reverse=True,
     )

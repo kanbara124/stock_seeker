@@ -7,8 +7,108 @@ from materials import Material
 
 load_dotenv()
 
-_MODEL = "deepseek-chat"
+_MODEL = "deepseek-v4-flash"
 _BASE_URL = "https://api.deepseek.com"
+_MAX_CHARS_PER_MATERIAL = 3000    # beyond this → pre-summarize
+
+
+# ---------------------------------------------------------------------------
+# internal helpers
+# ---------------------------------------------------------------------------
+
+def _client() -> OpenAI:
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY 未设置（检查 .env）")
+    return OpenAI(api_key=api_key, base_url=_BASE_URL)
+
+
+def _call_llm(
+    messages: list[dict],
+    *,
+    thinking: bool = False,
+    temperature: float = 0.3,
+) -> tuple[str, dict]:
+    """Unified LLM call.  Returns (text, usage_dict)."""
+    kwargs: dict = {
+        "model": _MODEL,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if thinking:
+        kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+
+    resp = _client().chat.completions.create(**kwargs)
+    text = resp.choices[0].message.content or ""
+    usage = {
+        "prompt_tokens": resp.usage.prompt_tokens if resp.usage else 0,
+        "completion_tokens": resp.usage.completion_tokens if resp.usage else 0,
+    }
+    # reasoning tokens are separate (not in standard usage)
+    if resp.usage and hasattr(resp.usage, "completion_tokens_details"):
+        details = resp.usage.completion_tokens_details
+        if hasattr(details, "reasoning_tokens"):
+            usage["reasoning_tokens"] = details.reasoning_tokens
+    return text, usage
+
+
+# ---------------------------------------------------------------------------
+# material pre-processing (non-thinking, cost-minimal)
+# ---------------------------------------------------------------------------
+
+_PRE_SUMMARIZE_PROMPT = (
+    "请将以下投资研究材料压缩为 400-800 字的要点摘要。"
+    "保留所有具体数字（金额、百分比、日期、估值）、关键事实和来源信息。"
+    "删除重复内容、修辞性语言和无关背景。"
+    "直接输出摘要，不要加任何前言。\n\n"
+    "原文：\n{text}"
+)
+
+
+def pre_summarize_material(text: str) -> tuple[str, dict]:
+    """Summarize a single long material into a shorter abstract.
+
+    Only called for materials exceeding the character threshold.
+    Uses non-thinking mode for minimal cost.
+    """
+    prompt = _PRE_SUMMARIZE_PROMPT.format(text=text)
+    return _call_llm(
+        [{"role": "user", "content": prompt}],
+        thinking=False,
+        temperature=0.2,
+    )
+
+
+def preprocess_materials(materials: list[Material]) -> tuple[list[Material], dict]:
+    """Run pre-summarization on long materials.  Returns modified list + cost.
+
+    Materials whose text exceeds _MAX_CHARS_PER_MATERIAL are replaced with
+    shortened versions (original URL and title preserved).
+    """
+    total_usage: dict = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "summarized_count": 0,
+    }
+    result: list[Material] = []
+
+    for m in materials:
+        if len(m.text) > _MAX_CHARS_PER_MATERIAL:
+            summary, usage = pre_summarize_material(m.text)
+            if summary:
+                result.append(Material(n=m.n, title=m.title, url=m.url, text=summary))
+                total_usage["summarized_count"] += 1
+                total_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
+                total_usage["completion_tokens"] += usage.get("completion_tokens", 0)
+                continue
+        result.append(m)
+
+    return result, total_usage
+
+
+# ---------------------------------------------------------------------------
+# main report generation (thinking mode)
+# ---------------------------------------------------------------------------
 
 _PROMPT_TEMPLATE = """你是资深行业研究员。根据下列 {n} 篇材料，为股票 {ticker} 撰写一份专业调研报告的四
 个章节。请像雪球深度分析帖一样思考：挖掘数据背后的逻辑，串联事件中的因果，让
@@ -97,27 +197,23 @@ def _format_materials(materials: list[Material]) -> str:
 
 
 def summarize_sections(ticker: str, materials: list[Material]) -> tuple[str, dict]:
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY 未设置（检查 .env）")
-
-    client = OpenAI(api_key=api_key, base_url=_BASE_URL)
+    """Generate the main report sections using thinking mode for deeper analysis."""
     prompt = _PROMPT_TEMPLATE.format(
         n=len(materials),
         ticker=ticker,
         materials=_format_materials(materials),
     )
-    resp = client.chat.completions.create(
-        model=_MODEL,
-        messages=[{"role": "user", "content": prompt}],
+    text, usage = _call_llm(
+        [{"role": "user", "content": prompt}],
+        thinking=True,
         temperature=0.3,
     )
-    usage = {
-        "prompt_tokens": resp.usage.prompt_tokens,
-        "completion_tokens": resp.usage.completion_tokens,
-    }
-    return resp.choices[0].message.content, usage
+    return text, usage
 
+
+# ---------------------------------------------------------------------------
+# guba sentiment (non-thinking)
+# ---------------------------------------------------------------------------
 
 _GUBA_PROMPT = """你是股市舆情分析师。根据以下 {ticker} 股吧帖子的标题和互动数据，总结散户情绪。
 
@@ -139,21 +235,9 @@ _GUBA_PROMPT = """你是股市舆情分析师。根据以下 {ticker} 股吧帖�
 
 
 def summarize_guba_sentiment(ticker: str, posts: list) -> str:
-    """Aggregate guba post titles into a sentiment summary.
-
-    Args:
-        ticker: stock ticker
-        posts: list of GubaPost or dicts with one_line() / title/reads/comments/user info
-
-    Returns:
-        A 150-250 char Chinese sentiment summary.
-    """
+    """Aggregate guba post titles into a sentiment summary (non-thinking)."""
     if not posts:
         return ""
-
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY 未设置（检查 .env）")
 
     lines = []
     for p in posts:
@@ -168,14 +252,13 @@ def summarize_guba_sentiment(ticker: str, posts: list) -> str:
                 f"【{title}】（{reads}阅读 {comments}评论 用户：{user}）"
             )
 
-    client = OpenAI(api_key=api_key, base_url=_BASE_URL)
     prompt = _GUBA_PROMPT.format(
         ticker=ticker,
         guba_posts="\n".join(lines[:50]),
     )
-    resp = client.chat.completions.create(
-        model=_MODEL,
-        messages=[{"role": "user", "content": prompt}],
+    text, _ = _call_llm(
+        [{"role": "user", "content": prompt}],
+        thinking=False,
         temperature=0.3,
     )
-    return resp.choices[0].message.content
+    return text

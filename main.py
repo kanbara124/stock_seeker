@@ -7,6 +7,13 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+from analytics import (
+    analyze_causal_chains,
+    analyze_sources,
+    build_analytics_text,
+    compute_financial_trends,
+    score_guba_sentiment,
+)
 from collector.fetcher import fetch_article
 from collector.fundamental import (
     get_announcements,
@@ -24,14 +31,19 @@ from collector.xueqiu import (
 )
 from materials import load_materials
 from report import render
-from summarizer import summarize_guba_sentiment, summarize_sections
+from summarizer import (
+    preprocess_materials,
+    summarize_guba_sentiment,
+    summarize_sections,
+)
 
 CACHE_DIR = Path("cache")
-NEWS_FETCH_LIMIT = 5
+NEWS_FETCH_LIMIT = 12
 ANNOUNCEMENT_WINDOW_DAYS = 90
-TAVILY_PER_QUERY = 5
-PDF_DOWNLOAD_LIMIT = 10
-GUBA_POST_LIMIT = 50
+TAVILY_PER_QUERY = 8
+PDF_DOWNLOAD_LIMIT = 15
+GUBA_POST_LIMIT = 80
+GUBA_PAGES = 3
 
 
 def _cache_path(ticker: str, url: str) -> Path:
@@ -78,9 +90,9 @@ def _cache_direct(
     return "fresh"
 
 
-XUEQIU_DISCUSSION_LIMIT = 5
-XUEQIU_ANNOUNCEMENT_LIMIT = 5
-NXNY_REPORT_LIMIT = 5
+XUEQIU_DISCUSSION_LIMIT = 10
+XUEQIU_ANNOUNCEMENT_LIMIT = 8
+NXNY_REPORT_LIMIT = 8
 
 
 def main(ticker: str, refresh: bool) -> None:
@@ -194,7 +206,7 @@ def main(ticker: str, refresh: bool) -> None:
         urls_this_run.add(guba_sentiment_url)
         print(f"    使用缓存")
     else:
-        guba_posts = fetch_guba_posts(ticker, limit=GUBA_POST_LIMIT)
+        guba_posts = fetch_guba_posts(ticker, limit=GUBA_POST_LIMIT, pages=GUBA_PAGES)
         if guba_posts:
             sentiment = summarize_guba_sentiment(ticker, guba_posts)
             if sentiment:
@@ -206,14 +218,40 @@ def main(ticker: str, refresh: bool) -> None:
         else:
             print(f"    股吧帖子获取失败")
 
+    print(f"[5.8/7] 数据洞察分析")
+    analytics_url = f"analytics://insight/{ticker}"
+    analytics_path = _cache_path(ticker, analytics_url)
+    if analytics_path.exists() and not refresh:
+        urls_this_run.add(analytics_url)
+        print(f"    使用缓存")
+    else:
+        guba_for_score = fetch_guba_posts(ticker, limit=GUBA_POST_LIMIT, pages=GUBA_PAGES)
+        trends = compute_financial_trends(financials)
+        sent_score = score_guba_sentiment(guba_for_score)
+        raw_materials = load_materials(CACHE_DIR / ticker)
+        src = analyze_sources(raw_materials)
+        causal = analyze_causal_chains(company_name, raw_materials)
+        analytics_text = build_analytics_text(trends, sent_score, src, causal)
+        _save_article(analytics_path, analytics_url, "数据洞察", analytics_text)
+        urls_this_run.add(analytics_url)
+        parts = ["财务趋势", "情绪量化", "来源覆盖"]
+        if causal:
+            parts.append("因果链分析")
+        print(f"    {' + '.join(parts)} 已生成")
+
     print(f"[6/7] 调用 LLM 生成三章节")
     materials = load_materials(CACHE_DIR / ticker, urls=urls_this_run)
     if not materials:
         print("素材库为空，终止")
         return
     print(f"    素材总数：{len(materials)}")
+    materials, pre_usage = preprocess_materials(materials)
+    if pre_usage["summarized_count"]:
+        print(f"    预处理：{pre_usage['summarized_count']} 篇长文摘要 "
+              f"（{pre_usage['prompt_tokens']}/{pre_usage['completion_tokens']} tokens）")
     llm_sections, usage = summarize_sections(ticker, materials)
-    print(f"    token: input={usage['prompt_tokens']}, output={usage['completion_tokens']}")
+    thinking_str = f" + {usage.get('reasoning_tokens', 0)} reasoning" if "reasoning_tokens" in usage else ""
+    print(f"    token: input={usage['prompt_tokens']}, output={usage['completion_tokens']}{thinking_str}")
 
     print(f"[7/7] 渲染 Markdown 报告")
     path = render(ticker, profile, financials, llm_sections, materials)
