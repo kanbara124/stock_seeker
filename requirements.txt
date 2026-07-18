@@ -6,3 +6,5 @@ tavily-python
 playwright
 beautifulsoup4
 lxml
+pymupdf
+requests

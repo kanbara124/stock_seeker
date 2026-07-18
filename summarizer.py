@@ -68,3 +68,65 @@ def summarize_sections(ticker: str, materials: list[Material]) -> tuple[str, dic
         "completion_tokens": resp.usage.completion_tokens,
     }
     return resp.choices[0].message.content, usage
+
+
+_GUBA_PROMPT = """你是股市舆情分析师。根据以下 {ticker} 股吧帖子的标题和互动数据，总结散户情绪。
+
+帖子数据格式：每行一条 【标题】（阅读数 评论数 用户：昵称）
+
+请输出一段 150-250 字的总结，包含：
+1. **多空比例**：估算看多/看空/中性帖子的比例
+2. **热议话题**：列出 2-3 个讨论最多的话题
+3. **整体情绪**：一句话概括散户当前情绪倾向
+
+注意：
+- 仅依据帖子标题判断多空，不要编造
+- 如果帖子样本不足（少于 5 条），注明"样本量有限"
+- 不要给出投资建议
+
+帖子列表：
+{guba_posts}
+"""
+
+
+def summarize_guba_sentiment(ticker: str, posts: list) -> str:
+    """Aggregate guba post titles into a sentiment summary.
+
+    Args:
+        ticker: stock ticker
+        posts: list of GubaPost or dicts with one_line() / title/reads/comments/user info
+
+    Returns:
+        A 150-250 char Chinese sentiment summary.
+    """
+    if not posts:
+        return ""
+
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY 未设置（检查 .env）")
+
+    lines = []
+    for p in posts:
+        if hasattr(p, "one_line"):
+            lines.append(p.one_line())
+        else:
+            title = p.get("title", "")
+            reads = p.get("reads", 0)
+            comments = p.get("comments", 0)
+            user = p.get("user_name", p.get("user", ""))
+            lines.append(
+                f"【{title}】（{reads}阅读 {comments}评论 用户：{user}）"
+            )
+
+    client = OpenAI(api_key=api_key, base_url=_BASE_URL)
+    prompt = _GUBA_PROMPT.format(
+        ticker=ticker,
+        guba_posts="\n".join(lines[:50]),
+    )
+    resp = client.chat.completions.create(
+        model=_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content

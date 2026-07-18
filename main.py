@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import sys
+import time as _time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -13,7 +14,9 @@ from collector.fundamental import (
     get_financial_abstract,
     get_recent_news,
 )
+from collector.guba import fetch_guba_posts
 from collector.nxny import get_nxny_reports
+from collector.pdf_fetcher import extract_announcement_pdf
 from collector.search import search_topics
 from collector.xueqiu import (
     get_xueqiu_announcements,
@@ -21,12 +24,14 @@ from collector.xueqiu import (
 )
 from materials import load_materials
 from report import render
-from summarizer import summarize_sections
+from summarizer import summarize_guba_sentiment, summarize_sections
 
 CACHE_DIR = Path("cache")
 NEWS_FETCH_LIMIT = 5
 ANNOUNCEMENT_WINDOW_DAYS = 90
 TAVILY_PER_QUERY = 5
+PDF_DOWNLOAD_LIMIT = 10
+GUBA_POST_LIMIT = 50
 
 
 def _cache_path(ticker: str, url: str) -> Path:
@@ -96,6 +101,7 @@ def main(ticker: str, refresh: bool) -> None:
     announcements = get_announcements(
         ticker, start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
     )
+    pdf_count = 0
     for _, row in announcements.iterrows():
         url = row["公告链接"]
         title = row["公告标题"]
@@ -104,10 +110,19 @@ def main(ticker: str, refresh: bool) -> None:
         if path.exists() and not refresh:
             urls_this_run.add(url)
             continue
-        body = f"公告标题：{title}\n公告日期：{pdate}\n（正文暂未提取，M5.5 阶段接入 PyMuPDF 解析 PDF 后补齐）"
+        pdf_text = None
+        if pdf_count < PDF_DOWNLOAD_LIMIT:
+            pdf_text = extract_announcement_pdf(url, pdate)
+            if pdf_text:
+                pdf_count += 1
+            _time.sleep(0.3)
+        if pdf_text:
+            body = f"公告标题：{title}\n公告日期：{pdate}\n\n{pdf_text}"
+        else:
+            body = f"公告标题：{title}\n公告日期：{pdate}\n（PDF 正文暂未提取）"
         _save_article(path, url, title, body)
         urls_this_run.add(url)
-    print(f"    巨潮公告：{len(announcements)} 条")
+    print(f"    巨潮公告：{len(announcements)} 条（PDF 提取 {pdf_count} 条）")
 
     xq_ann_stats = {"hit": 0, "fresh": 0, "dup": 0, "skip": 0}
     xq_announcements = get_xueqiu_announcements(
@@ -171,6 +186,25 @@ def main(ticker: str, refresh: bool) -> None:
     print(f"    股票报告网研报：{len(nxny_reports)} 条")
     print(f"    T4 合计 → 命中 {t4_stats['hit']} / 新存 {t4_stats['fresh']} / "
           f"去重 {t4_stats['dup']} / 跳过 {t4_stats['skip']}")
+
+    print(f"[5.5/7] 股吧情绪聚合")
+    guba_sentiment_url = f"guba://sentiment/{ticker}"
+    guba_path = _cache_path(ticker, guba_sentiment_url)
+    if guba_path.exists() and not refresh:
+        urls_this_run.add(guba_sentiment_url)
+        print(f"    使用缓存")
+    else:
+        guba_posts = fetch_guba_posts(ticker, limit=GUBA_POST_LIMIT)
+        if guba_posts:
+            sentiment = summarize_guba_sentiment(ticker, guba_posts)
+            if sentiment:
+                _save_article(guba_path, guba_sentiment_url, "股吧情绪总结", sentiment)
+                urls_this_run.add(guba_sentiment_url)
+                print(f"    股吧帖子 {len(guba_posts)} 条 → 情绪总结已生成")
+            else:
+                print(f"    股吧帖子 {len(guba_posts)} 条 → LLM 聚合失败")
+        else:
+            print(f"    股吧帖子获取失败")
 
     print(f"[6/7] 调用 LLM 生成三章节")
     materials = load_materials(CACHE_DIR / ticker, urls=urls_this_run)
