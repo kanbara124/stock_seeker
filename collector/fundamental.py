@@ -109,12 +109,17 @@ def get_company_profile(ticker: str) -> CompanyProfile:
     if market_cap:
         try:
             fin = get_financial_abstract(ticker, periods=6)
-            annual = fin[fin["报告期"].str.contains("-12-31", na=False)]
-            if len(annual) > 0:
-                net_profit_raw = str(annual.iloc[0]["净利润"]).replace("亿", "").strip()
-                net_profit = float(net_profit_raw)
-                if net_profit > 0:
-                    pe_ttm = round(market_cap / net_profit, 1)
+            net_profits = []
+            for _, r in fin.iterrows():
+                try:
+                    np_val = float(str(r["净利润"]).replace("亿", "").strip())
+                    net_profits.append(np_val)
+                except (ValueError, TypeError):
+                    pass
+            if len(net_profits) >= 4:
+                ttm_profit = sum(net_profits[:4])
+                if ttm_profit > 0:
+                    pe_ttm = round(market_cap / ttm_profit, 1)
         except Exception:
             pass
 
@@ -164,8 +169,9 @@ def get_recent_news(ticker: str, limit: int = 10) -> pd.DataFrame:
 _FIN_COLS = ["报告期", "营业总收入", "营业总收入同比增长率", "净利润", "净利润同比增长率"]
 
 
-def get_financial_abstract(ticker: str, periods: int = 6) -> pd.DataFrame:
-    df = ak.stock_financial_abstract_ths(symbol=ticker, indicator="按报告期")
+def get_financial_abstract(ticker: str, periods: int = 8) -> pd.DataFrame:
+    """Fetch single-quarter financial abstracts for quarter-to-quarter comparison."""
+    df = ak.stock_financial_abstract_ths(symbol=ticker, indicator="按单季度")
     return (
         df[_FIN_COLS]
         .sort_values("报告期", ascending=False)
@@ -220,7 +226,7 @@ def get_peer_financials(peers: list[dict]) -> list[PeerFinancialSnapshot]:
     results: list[PeerFinancialSnapshot] = []
     for p in peers:
         try:
-            df = ak.stock_financial_abstract_ths(symbol=p["ticker"], indicator="按报告期")
+            df = ak.stock_financial_abstract_ths(symbol=p["ticker"], indicator="按单季度")
             latest = df.iloc[0]
             results.append(PeerFinancialSnapshot(
                 ticker=p["ticker"],

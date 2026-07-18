@@ -9,3 +9,5 @@ lxml
 pymupdf
 requests
 streamlit
+markdown
+weasyprint

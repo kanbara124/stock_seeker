@@ -130,7 +130,7 @@ with tab1:
         status_container = st.empty()
 
         with st.status(f"正在分析 {ticker}……", expanded=True) as status:
-            st.write("数据采集 + LLM 分析中，请稍候（约 45-90 秒）…")
+            st.write("数据采集 + LLM 分析中，请稍候（约 2-6 分钟）…")
             report_path, log = _run_pipeline(ticker, refresh)
 
             if report_path:
@@ -164,6 +164,16 @@ with tab1:
                     file_name=Path(report_path).name,
                     mime="text/markdown",
                 )
+
+            pdf_path = Path(report_path).with_suffix(".pdf")
+            if pdf_path.exists():
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        "📥 下载 PDF 报告",
+                        f,
+                        file_name=pdf_path.name,
+                        mime="application/pdf",
+                    )
         else:
             st.error("报告生成失败，请查看上方运行日志排查问题")
 
@@ -182,8 +192,9 @@ with tab2:
     else:
         st.markdown(f"共 {len(reports)} 份历史报告")
         for r in reports:
-            ticker_part = r.stem.split("_")[0]
-            date_part = r.stem[len(ticker_part) + 1 :]
-            with st.expander(f"📄 {ticker_part} — {date_part}", expanded=False):
+            parts = r.stem.split("_", 1)
+            ticker_part = parts[0]
+            rest = parts[1] if len(parts) > 1 else ""
+            with st.expander(f"📄 {ticker_part} — {rest}", expanded=False):
                 content = r.read_text(encoding="utf-8")
                 st.markdown(content, unsafe_allow_html=False)

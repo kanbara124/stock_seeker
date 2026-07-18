@@ -5,7 +5,10 @@ import time as _time
 from datetime import date, timedelta
 from pathlib import Path
 
-sys.stdout.reconfigure(encoding="utf-8")
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except AttributeError:
+    pass
 
 from analytics import (
     analyze_causal_chains,
@@ -37,7 +40,7 @@ from collector.xueqiu import (
     get_xueqiu_discussions,
 )
 from materials import load_materials
-from report import render
+from report import render, render_pdf
 from summarizer import (
     preprocess_materials,
     summarize_guba_sentiment,
@@ -103,6 +106,7 @@ NXNY_REPORT_LIMIT = 8
 
 
 def main(ticker: str, refresh: bool) -> None:
+    t_start = _time.time()
     print(f"[1/9] 抓取公司概况 {ticker}")
     profile = get_company_profile(ticker)
     company_name = profile.name
@@ -270,6 +274,7 @@ def main(ticker: str, refresh: bool) -> None:
         print(f"    同业对比搜索：{len(pc_hits)} 篇，同行财务：{len(peer_fins)} 家")
 
     print(f"[5.8/9] 数据洞察分析")
+    t_a = _time.time()
     analytics_url = f"analytics://insight/{ticker}"
     analytics_path = _cache_path(ticker, analytics_url)
     if analytics_path.exists() and not refresh:
@@ -308,8 +313,11 @@ def main(ticker: str, refresh: bool) -> None:
         if peer_comparison_text:
             parts.append("同业比较")
         print(f"    {' + '.join(parts)} 已生成")
+    _t_a = _time.time() - t_a
+    print(f"    ⏱ 数据洞察耗时 {_t_a:.1f}s")
 
     print(f"[6/9] 调用 LLM 生成六章节")
+    t_llm = _time.time()
     materials = load_materials(CACHE_DIR / ticker, urls=urls_this_run)
     if not materials:
         print("素材库为空，终止")
@@ -322,10 +330,16 @@ def main(ticker: str, refresh: bool) -> None:
     llm_sections, usage = summarize_sections(ticker, materials)
     thinking_str = f" + {usage.get('reasoning_tokens', 0)} reasoning" if "reasoning_tokens" in usage else ""
     print(f"    token: input={usage['prompt_tokens']}, output={usage['completion_tokens']}{thinking_str}")
+    _t_llm = _time.time() - t_llm
+    print(f"    ⏱ LLM 生成耗时 {_t_llm:.1f}s")
 
     print(f"[7/9] 渲染 Markdown 报告")
     path = render(ticker, profile, financials, llm_sections, materials)
     print(f"    已生成：{path}")
+    pdf_path = render_pdf(path)
+    if pdf_path:
+        print(f"    PDF 已生成：{pdf_path}")
+    print(f"\n  ✓ 总耗时 {_time.time() - t_start:.1f}s")
 
 
 if __name__ == "__main__":

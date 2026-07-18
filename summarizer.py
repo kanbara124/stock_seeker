@@ -1,4 +1,6 @@
 import os
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -10,6 +12,8 @@ load_dotenv()
 _MODEL = "deepseek-v4-flash"
 _BASE_URL = "https://api.deepseek.com"
 _MAX_CHARS_PER_MATERIAL = 3000    # beyond this → pre-summarize
+_LLM_TIMEOUT = 120                # seconds, per-request cutoff
+_PRE_SUMMARIZE_MAX_WORKERS = 4    # parallel pre-summarization threads
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +38,7 @@ def _call_llm(
         "model": _MODEL,
         "messages": messages,
         "temperature": temperature,
+        "timeout": _LLM_TIMEOUT,
     }
     if thinking:
         kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
@@ -44,7 +49,6 @@ def _call_llm(
         "prompt_tokens": resp.usage.prompt_tokens if resp.usage else 0,
         "completion_tokens": resp.usage.completion_tokens if resp.usage else 0,
     }
-    # reasoning tokens are separate (not in standard usage)
     if resp.usage and hasattr(resp.usage, "completion_tokens_details"):
         details = resp.usage.completion_tokens_details
         if hasattr(details, "reasoning_tokens"):
@@ -79,8 +83,17 @@ def pre_summarize_material(text: str) -> tuple[str, dict]:
     )
 
 
+def _pre_summarize_one(m: Material) -> Material:
+    if len(m.text) <= _MAX_CHARS_PER_MATERIAL:
+        return m
+    summary, _ = pre_summarize_material(m.text)
+    if summary:
+        return Material(n=m.n, title=m.title, url=m.url, text=summary)
+    return m
+
+
 def preprocess_materials(materials: list[Material]) -> tuple[list[Material], dict]:
-    """Run pre-summarization on long materials.  Returns modified list + cost.
+    """Run pre-summarization on long materials in parallel.  Returns modified list + cost.
 
     Materials whose text exceeds _MAX_CHARS_PER_MATERIAL are replaced with
     shortened versions (original URL and title preserved).
@@ -90,39 +103,46 @@ def preprocess_materials(materials: list[Material]) -> tuple[list[Material], dic
         "completion_tokens": 0,
         "summarized_count": 0,
     }
-    result: list[Material] = []
 
-    for m in materials:
-        if len(m.text) > _MAX_CHARS_PER_MATERIAL:
-            summary, usage = pre_summarize_material(m.text)
-            if summary:
-                result.append(Material(n=m.n, title=m.title, url=m.url, text=summary))
+    long_indices = [i for i, m in enumerate(materials) if len(m.text) > _MAX_CHARS_PER_MATERIAL]
+    if not long_indices:
+        return list(materials), total_usage
+
+    with ThreadPoolExecutor(max_workers=_PRE_SUMMARIZE_MAX_WORKERS) as executor:
+        future_to_idx = {
+            executor.submit(_pre_summarize_one, materials[i]): i
+            for i in long_indices
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                materials[idx] = future.result()
                 total_usage["summarized_count"] += 1
-                total_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
-                total_usage["completion_tokens"] += usage.get("completion_tokens", 0)
-                continue
-        result.append(m)
+            except Exception:
+                pass
 
-    return result, total_usage
+    return materials, total_usage
 
 
 # ---------------------------------------------------------------------------
 # main report generation (thinking mode)
 # ---------------------------------------------------------------------------
 
-_PROMPT_TEMPLATE = """你是资深行业研究员。根据下列 {n} 篇材料，为股票 {ticker} 撰写一份专业调研报告的六
+_PROMPT_TEMPLATE = """你是资深行业研究员。根据下列 {n} 篇材料，为股票 {ticker} 撰写一份专业调研报告的七
 个章节。请像雪球深度分析帖一样思考：挖掘数据背后的逻辑，串联事件中的因果，让
 读者理解"发生了什么、为什么重要、接下来怎么看"。
 
 ═══════════════════════════════════════
                写作铁律
 ═══════════════════════════════════════
+0. **禁止任何开场白、导语、问候语或自我介绍。输出必须以第一个章节标题 "## 三、业务与行业分析" 开头，前面不得有任何文字。**
 1. 每一句事实性陈述必须标注来源编号 [n]，多来源写 [1][3]。不标注 = 编造。
 2. 优先使用材料中的具体数字（增长率、金额、百分比、吨/辆/元），绝不泛泛而谈。
 3. 材料中没出现的逻辑链条，写"公开资料未涵盖该维度"，禁止脑补。
 4. 语言客观、冷静，禁止"强烈看好""必将爆发""千载难逢"等煽动性措辞。
 5. 每个子标题必须是信息量密集的判断句，而非空洞标签（例："飞天茅台年内两度提价，合同价累计上调200元/瓶" 而非 "价格调整"）。
 6. 章节标题（含编号 ## 三、标题）与层级不得改动，不得增加新的 ## 级标题。
+7. **宁漏大勿漏快**：若公司有多个业务板块，必须全部覆盖。当前收入占比最大的板块 ≠ 最重要的板块。对增速高、成长潜力大的板块（即使收入占比小），要给予不低于收入大板块的篇幅和分析深度。材料中出现的各板块增速数据，必须逐一列出并对比。
 
 ═══════════════════════════════════════
                输出模板
@@ -130,13 +150,14 @@ _PROMPT_TEMPLATE = """你是资深行业研究员。根据下列 {n} 篇材料�
 
 ## 三、业务与行业分析
 
-（300-500 字）
+（350-600 字）
 
 要求：
-- 拆解公司的营收结构或业务板块（如有数据）；若无分部数据，聚焦主营业务模式。
+- **第一步：拆全**。列出公司所有业务板块/产品线，标注每个板块的收入占比和同比增速 [来源编号]。不可遗漏任何材料中提到的板块。
+- **第二步：比速**。比较各板块的增速差异。增速最高和最低的板块分别是什么？增速差异反映了怎样的战略重心转移或行业景气分化？
+- **第三步：看势**。对高增速板块（即使收入占比目前较小），深入分析：增长驱动力是什么（国产替代？下游景气？技术突破？大客户导入？）可持续性如何？
+- **第四步：定性**。对收入占比大但增速放缓的板块，分析原因（行业见顶？竞争加剧？公司战略收缩？）。
 - 指出公司所处行业的当前阶段（景气/调整/转型），引用材料中的行业数据佐证。
-- 分析公司的竞争壁垒或市场地位（引用具体经营数据，如市占率、产能、客户结构等）。
-- 将公司近期动作（涨价/扩产/回购/人事变动等）放入行业背景中解读。
 - 若材料仅覆盖部分维度，明确说明"公开资料未覆盖 X 方面"。
 
 ## 四、近期动态
@@ -149,8 +170,25 @@ _PROMPT_TEMPLATE = """你是资深行业研究员。根据下列 {n} 篇材料�
 - 关键事件必须用具体数字说话（"每股派息 28.02 元，较上年变化 X%"）。
 - 区分"事实"与"解读"：事实标注来源，解读用"反映/意味着/可能表明"等措辞。
 - 对相互矛盾的事件（如同时涨价和销量下滑），正面点出张力而非回避。
+- **覆盖要全**：若近期动态涉及多个业务板块，不可只讲收入占比最大的一个。
 
-## 五、市场观点与分歧
+## 五、年内新发展
+
+（400-600 字）
+
+要求：
+- 聚焦公司**近一年内**出现的重大发展和变化，而非日常经营细节。
+- **增长视角优先**：优先关注那些增速快、边际变化大的板块。一个收入占比 30% 但增速 50% 的板块，比一个收入占比 70% 但增速 5% 的板块更值得作为"新发展"来写。
+- 至少覆盖以下 2-3 个维度（按**增长潜力和变化幅度**选择，而非按收入规模选择）：
+  - **新产品 / 新业务**：公司推出了什么新产品或进入了什么新业务领域？量产/商业化进度如何 [来源编号]？
+  - **新产线 / 产能扩张**：是否有新工厂投产、产线升级、产能爬坡？投资规模和预计产值 [来源编号]？
+  - **技术突破**：公司取得了哪些关键技术突破或研发里程碑？对行业竞争格局的影响 [来源编号]？
+  - **新市场 / 新客户**：是否进入新的地理市场或拿下重要大客户？订单规模和战略意义 [来源编号]？
+  - **新模式 / 新战略**：公司是否调整了商业模式或战略方向（如：从设备销售转向服务收费、从国内转向出海、从单品转向平台）？
+- 每个维度要写清"发生了什么变化 → 变化前后的对比 → 为什么重要"。
+- 若材料中缺乏相关信息，写"公开资料未充分覆盖该公司近一年的新发展动向"。
+
+## 六、市场观点与分歧
 
 （400-600 字）
 
@@ -169,7 +207,7 @@ _PROMPT_TEMPLATE = """你是资深行业研究员。根据下列 {n} 篇材料�
 - 若多空失衡（如只有看多研报），用"公开资料中，看空观点主要来自……"的方式补足。
 - 禁止用"公开资料未覆盖空方立场"一句话带过——至少要尝试从新闻/论坛/数据中挖掘反面信号。
 
-## 六、风险与前瞻
+## 七、风险与前瞻
 
 （300-400 字）
 
@@ -180,7 +218,7 @@ _PROMPT_TEMPLATE = """你是资深行业研究员。根据下列 {n} 篇材料�
   机构预测等），合理推演未来 6-12 个月的可能情景。注明"以下为基于公开信息的推演，不构成预测"。
 - 若材料中缺乏前瞻数据，写"公开材料未提供足够信息用于短期展望"。
 
-## 七、产业链上下游分析
+## 八、产业链上下游分析
 
 （300-400 字）
 
@@ -192,7 +230,7 @@ _PROMPT_TEMPLATE = """你是资深行业研究员。根据下列 {n} 篇材料�
 - 在合适的情况下，提及产业链中涉及的具体上市公司及其与目标公司的业务关联。
 - 若材料仅覆盖部分环节，明确说明"公开资料未涵盖 X 环节"。
 
-## 八、同业比较
+## 九、同业比较
 
 （400-500 字）
 
@@ -232,6 +270,7 @@ def summarize_sections(ticker: str, materials: list[Material]) -> tuple[str, dic
         thinking=True,
         temperature=0.3,
     )
+    text = re.sub(r'^.*?(?=##\s)', '', text, count=1, flags=re.DOTALL)
     return text, usage
 
 

@@ -40,6 +40,22 @@ def _parse_fin(val: Any) -> float:
         return 0.0
 
 
+def _build_annual_totals(financials: pd.DataFrame) -> dict[int, dict[str, float]]:
+    """Sum single-quarter financials into annual totals, keyed by year."""
+    rev_col = "营业总收入"
+    profit_col = "净利润"
+    by_year: dict[int, dict[str, float]] = {}
+    for _, row in financials.iterrows():
+        period = str(row["报告期"])
+        year = int(period[:4])
+        if year not in by_year:
+            by_year[year] = {"revenue": 0.0, "profit": 0.0, "quarters": 0}
+        by_year[year]["revenue"] += _parse_fin(row.get(rev_col, 0))
+        by_year[year]["profit"] += _parse_fin(row.get(profit_col, 0))
+        by_year[year]["quarters"] += 1
+    return by_year
+
+
 def compute_financial_trends(financials: pd.DataFrame) -> FinancialTrends:
     """Analyze financial data table for trends."""
     t = FinancialTrends()
@@ -66,19 +82,20 @@ def compute_financial_trends(financials: pd.DataFrame) -> FinancialTrends:
         except (IndexError, KeyError):
             pass
 
-    # 3-year CAGR from annual reports
-    annual = financials[financials["报告期"].astype(str).str.contains("-12-31", na=False)]
-    if len(annual) >= 3:
-        rev_values = [_parse_fin(v) for v in annual[rev_col]]
-        profit_values = [_parse_fin(v) for v in annual[profit_col]]
-        if rev_values[2] > 0 and rev_values[0] > 0:
-            t.revenue_cagr_3y = round(
-                ((rev_values[0] / rev_values[2]) ** (1 / 3) - 1) * 100, 1
-            )
-        if profit_values[2] > 0 and profit_values[0] > 0:
-            t.profit_cagr_3y = round(
-                ((profit_values[0] / profit_values[2]) ** (1 / 3) - 1) * 100, 1
-            )
+    # 3-year CAGR from trailing 12-month sums
+    annual_summary = _build_annual_totals(financials)
+    years_sorted = sorted(annual_summary.keys(), reverse=True)
+    if len(years_sorted) >= 4:
+        latest_year = years_sorted[0]
+        three_years_ago = years_sorted[3]
+        rev_latest = annual_summary[latest_year]["revenue"]
+        rev_old = annual_summary[three_years_ago]["revenue"]
+        profit_latest = annual_summary[latest_year]["profit"]
+        profit_old = annual_summary[three_years_ago]["profit"]
+        if rev_old > 0:
+            t.revenue_cagr_3y = round(((rev_latest / rev_old) ** (1 / 3) - 1) * 100, 1)
+        if profit_old > 0:
+            t.profit_cagr_3y = round(((profit_latest / profit_old) ** (1 / 3) - 1) * 100, 1)
 
     # growth volatility (from YoY growth column)
     if growth_col in financials.columns:
@@ -292,6 +309,7 @@ def analyze_causal_chains(
         model="deepseek-v4-flash",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
+        timeout=120,
     )
     return resp.choices[0].message.content or ""
 
